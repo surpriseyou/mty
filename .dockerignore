@@ -1,0 +1,11 @@
+.git
+.agents
+.codex
+**/bin
+**/obj
+**/target
+**/node_modules
+**/dist
+server/packages
+web/.npm-cache
+*.log
