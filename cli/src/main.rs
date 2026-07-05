@@ -184,9 +184,12 @@ fn initialize_home(paths: &Paths) -> Result<()> {
 
 fn init(paths: &Paths) -> Result<()> {
     initialize_home(paths)?;
+    let installed = install_current_mty_executable(paths)?;
     println!("MTY home: {}", paths.root.display());
     println!("Tools: {}", paths.tools.display());
     println!("Command shims: {}", paths.bin.display());
+    println!("MTY executable: {}", installed.display());
+    println!("Command: mty");
     println!("PATH is configured for future shells. Restart your terminal if commands are not found yet.");
     Ok(())
 }
@@ -517,8 +520,12 @@ fn create_command_shim(paths: &Paths, manifest: &PackageManifest) -> Result<()> 
         return Err(anyhow!("entry file does not exist after install: {}", entry.display()));
     }
 
+    write_command_shim(paths, &manifest.name, &entry)
+}
+
+fn write_command_shim(paths: &Paths, name: &str, entry: &Path) -> Result<()> {
     fs::create_dir_all(&paths.bin)?;
-    let shim = command_shim_path(paths, &manifest.name);
+    let shim = command_shim_path(paths, name);
     let content = command_shim_content(&entry);
     let mut file = File::create(&shim)?;
     file.write_all(content.as_bytes())?;
@@ -530,6 +537,33 @@ fn create_command_shim(paths: &Paths, manifest: &PackageManifest) -> Result<()> 
     }
 
     Ok(())
+}
+
+fn install_current_mty_executable(paths: &Paths) -> Result<PathBuf> {
+    let source = env::current_exe().context("cannot resolve current mty executable")?;
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| anyhow!("current executable has no file name"))?;
+    let target_dir = paths.tools.join("mty");
+    let target = target_dir.join(file_name);
+
+    fs::create_dir_all(&target_dir)
+        .with_context(|| format!("unable to create {}", target_dir.display()))?;
+
+    if !same_file_path(&source, &target) {
+        fs::copy(&source, &target)
+            .with_context(|| format!("unable to install mty executable to {}", target.display()))?;
+    }
+
+    write_command_shim(paths, "mty", &target)?;
+    Ok(target)
+}
+
+fn same_file_path(left: &Path, right: &Path) -> bool {
+    match (left.canonicalize(), right.canonicalize()) {
+        (Ok(left), Ok(right)) => paths_equal(&left, &right),
+        _ => paths_equal(left, right),
+    }
 }
 
 fn remove_command_shim(paths: &Paths, name: &str) -> Result<()> {
