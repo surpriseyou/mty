@@ -6,8 +6,7 @@
         <p>{{ detail?.description ?? 'Package details' }}</p>
       </div>
       <div class="title-actions">
-        <el-button @click="$router.push('/upload')">Upload version</el-button>
-        <el-button type="danger" @click="deletePackage">Delete package</el-button>
+        <el-button type="primary" @click="openNewPackage">新增package</el-button>
       </div>
     </div>
     <div class="panel">
@@ -20,11 +19,13 @@
         <el-table-column prop="signature" label="Signature" min-width="220" show-overflow-tooltip />
         <el-table-column prop="status" label="Status" width="130" />
         <el-table-column prop="downloadCount" label="Downloads" width="120" />
-        <el-table-column label="Actions" width="300">
+        <el-table-column label="Actions" width="460">
           <template #default="{ row }">
-            <el-button size="small" type="success" @click="publish(row.version)">Publish</el-button>
-            <el-button size="small" @click="unpublish(row.version)">Unpublish</el-button>
-            <el-button size="small" type="primary" @click="resign(row.version)">Re-sign</el-button>
+            <el-button size="small" @click="downloadVersion(row)">Download</el-button>
+            <el-button size="small" type="success" @click="publish(row)">Publish</el-button>
+            <el-button size="small" @click="unpublish(row)">Unpublish</el-button>
+            <el-button size="small" type="primary" @click="resign(row)">Re-sign</el-button>
+            <el-button size="small" type="danger" @click="deleteVersion(row)">Delete</el-button>
           </template>
         </el-table-column>
       </el-table>
@@ -49,6 +50,7 @@ const router = useRouter()
 const name = String(route.params.name)
 const detail = ref<Detail | null>(null)
 const loading = ref(false)
+type VersionRow = Detail['versions'][number]
 
 async function load() {
   loading.value = true
@@ -60,33 +62,78 @@ async function load() {
   }
 }
 
-async function publish(version: string) {
-  await api.post(`/api/admin/packages/${name}/versions/${version}/publish`)
+function versionTargetParams(version: VersionRow) {
+  return {
+    platform: version.platform,
+    arch: version.arch
+  }
+}
+
+async function publish(version: VersionRow) {
+  await api.post(`/api/admin/packages/${name}/versions/${version.version}/publish`, null, {
+    params: versionTargetParams(version)
+  })
   ElMessage.success('Version published')
   await load()
 }
 
-async function unpublish(version: string) {
-  await api.post(`/api/admin/packages/${name}/versions/${version}/unpublish`)
+async function unpublish(version: VersionRow) {
+  await api.post(`/api/admin/packages/${name}/versions/${version.version}/unpublish`, null, {
+    params: versionTargetParams(version)
+  })
   ElMessage.success('Version unpublished')
   await load()
 }
 
-async function resign(version: string) {
-  await api.post(`/api/admin/packages/${name}/versions/${version}/resign`)
+async function resign(version: VersionRow) {
+  await api.post(`/api/admin/packages/${name}/versions/${version.version}/resign`, null, {
+    params: versionTargetParams(version)
+  })
   ElMessage.success('Version signed')
   await load()
 }
 
-async function deletePackage() {
-  await ElMessageBox.confirm(`Delete package ${name} and all versions?`, 'Delete package', {
-    type: 'warning',
-    confirmButtonText: 'Delete',
-    cancelButtonText: 'Cancel'
+async function downloadVersion(version: VersionRow) {
+  const response = await api.get(`/api/admin/packages/${name}/versions/${version.version}/download`, {
+    params: versionTargetParams(version),
+    responseType: 'blob'
   })
-  await api.delete(`/api/admin/packages/${name}`)
-  ElMessage.success('Package deleted')
-  router.push('/packages')
+  const blobUrl = URL.createObjectURL(response.data)
+  const link = document.createElement('a')
+  link.href = blobUrl
+  link.download = `${name}-${version.version}-${version.platform}-${version.arch}.mty`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(blobUrl)
+  await load()
+}
+
+function openNewPackage() {
+  router.push({
+    path: '/packages/new',
+    query: {
+      name,
+      description: detail.value?.description ?? ''
+    }
+  })
+}
+
+async function deleteVersion(version: VersionRow) {
+  await ElMessageBox.confirm(
+    `Delete version ${version.version} (${version.platform}/${version.arch})?`,
+    'Delete version',
+    {
+      type: 'warning',
+      confirmButtonText: 'Delete',
+      cancelButtonText: 'Cancel'
+    }
+  )
+  await api.delete(`/api/admin/packages/${name}/versions/${version.version}`, {
+    params: versionTargetParams(version)
+  })
+  ElMessage.success('Version deleted')
+  await load()
 }
 
 onMounted(load)

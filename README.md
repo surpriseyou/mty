@@ -99,6 +99,7 @@ Default development admin:
 ```powershell
 cd cli
 cargo run -- init
+cargo run -- system-info
 cargo run -- --registry http://localhost:5000 search demo
 ```
 

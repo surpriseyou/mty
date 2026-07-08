@@ -2,12 +2,30 @@
   <section class="page">
     <div class="page-title">
       <div>
-        <h1>Upload version</h1>
-        <p>Register a signed .mty package for a target platform.</p>
+        <h1>{{ isEdit ? 'Edit package' : '新增package' }}</h1>
+        <p>{{ isEdit ? 'Update package metadata.' : 'Create a package or prepare a new internal tool release.' }}</p>
       </div>
     </div>
     <div class="panel">
-      <el-tabs v-model="mode">
+      <el-form label-position="top">
+        <el-row :gutter="16">
+          <el-col :span="12">
+            <el-form-item label="Package name">
+              <el-input v-model="packageForm.name" placeholder="demo-tool" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="12">
+            <el-form-item label="Description">
+              <el-input v-model="packageForm.description" placeholder="Internal utility" />
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-button type="primary" :loading="loading" @click="savePackage">
+          {{ isEdit ? 'Save changes' : 'Create package' }}
+        </el-button>
+      </el-form>
+
+      <el-tabs v-if="!isEdit" v-model="mode" class="version-tabs">
         <el-tab-pane label=".mty package" name="package">
           <el-form label-position="top">
             <el-alert
@@ -32,20 +50,10 @@
           <el-form label-position="top">
             <el-row :gutter="16">
               <el-col :span="12">
-                <el-form-item label="Package name">
-                  <el-input v-model="executableForm.name" placeholder="demo-tool" />
-                </el-form-item>
-              </el-col>
-              <el-col :span="12">
                 <el-form-item label="Version">
                   <el-input v-model="executableForm.version" placeholder="1.0.0" />
                 </el-form-item>
               </el-col>
-            </el-row>
-            <el-form-item label="Description">
-              <el-input v-model="executableForm.description" placeholder="Internal utility" />
-            </el-form-item>
-            <el-row :gutter="16">
               <el-col :span="12">
                 <el-form-item label="Platform">
                   <el-select v-model="executableForm.platform">
@@ -82,23 +90,34 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue'
+import { computed, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import type { UploadFile } from 'element-plus'
 import { ElMessage } from 'element-plus'
 import { api, type PackageManifest } from '../api'
 
+const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const mode = ref('package')
 const packageFile = ref<File | null>(null)
 const executableFile = ref<File | null>(null)
 const manifest = ref<PackageManifest | null>(null)
+const isEdit = computed(() => route.meta.editPackage === true)
+const originalName = String(route.params.name ?? '')
+const packageForm = reactive({
+  name: queryValue(route.query.name) || originalName,
+  description: queryValue(route.query.description)
+})
 const executableForm = reactive({
-  name: '',
   version: '',
-  description: '',
   platform: 'windows',
   arch: 'x86_64'
 })
+
+function queryValue(value: unknown) {
+  return Array.isArray(value) ? String(value[0] ?? '') : String(value ?? '')
+}
 
 async function selectPackageFile(uploadFile: UploadFile) {
   packageFile.value = uploadFile.raw ?? null
@@ -114,6 +133,12 @@ async function selectPackageFile(uploadFile: UploadFile) {
       return
     }
     manifest.value = JSON.parse(await manifestEntry.async('string')) as PackageManifest
+    if (!packageForm.name) {
+      packageForm.name = manifest.value.name
+    }
+    if (!packageForm.description) {
+      packageForm.description = manifest.value.description ?? ''
+    }
   } catch {
     ElMessage.error('Unable to read manifest.json from this .mty package')
   }
@@ -121,6 +146,28 @@ async function selectPackageFile(uploadFile: UploadFile) {
 
 function selectExecutableFile(uploadFile: UploadFile) {
   executableFile.value = uploadFile.raw ?? null
+}
+
+async function savePackage() {
+  if (!packageForm.name || !packageForm.description) {
+    ElMessage.warning('Package name and description are required')
+    return
+  }
+
+  loading.value = true
+  try {
+    if (isEdit.value) {
+      await api.put(`/api/admin/packages/${originalName}`, packageForm)
+      ElMessage.success('Package updated')
+      router.push(`/packages/${packageForm.name}`)
+    } else {
+      await api.post('/api/admin/packages', packageForm)
+      ElMessage.success('Package created')
+      router.push(`/packages/${packageForm.name}`)
+    }
+  } finally {
+    loading.value = false
+  }
 }
 
 async function uploadPackage() {
@@ -135,6 +182,7 @@ async function uploadPackage() {
     body.append('file', packageFile.value)
     await api.post(`/api/admin/packages/${manifest.value!.name}/versions`, body)
     ElMessage.success('Version uploaded as draft')
+    router.push(`/packages/${manifest.value!.name}`)
   } finally {
     loading.value = false
   }
@@ -145,7 +193,7 @@ async function generatePackage(forcedName?: string) {
     ElMessage.warning('Choose an executable file first')
     return
   }
-  const packageName = forcedName ?? executableForm.name
+  const packageName = forcedName ?? packageForm.name
   if (!packageName || !executableForm.version) {
     ElMessage.warning('Package name and version are required')
     return
@@ -157,10 +205,11 @@ async function generatePackage(forcedName?: string) {
     body.append('version', executableForm.version)
     body.append('platform', executableForm.platform)
     body.append('arch', executableForm.arch)
-    body.append('description', executableForm.description)
+    body.append('description', packageForm.description)
     body.append('file', executableFile.value)
     await api.post(`/api/admin/packages/${packageName}/versions/from-executable`, body)
     ElMessage.success(forcedName ? 'Self-update package uploaded as draft' : 'Generated .mty draft from executable')
+    router.push(`/packages/${packageName}`)
   } finally {
     loading.value = false
   }
@@ -170,5 +219,9 @@ async function generatePackage(forcedName?: string) {
 <style scoped>
 .manifest-summary {
   margin-bottom: 18px;
+}
+
+.version-tabs {
+  margin-top: 24px;
 }
 </style>

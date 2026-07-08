@@ -33,6 +33,7 @@ enum Commands {
     Init,
     Search { keyword: String },
     Info { name: String },
+    SystemInfo,
     Install { name: String, #[arg(long)] version: Option<String> },
     Update { name: Option<String> },
     Remove { name: String },
@@ -143,6 +144,10 @@ fn main() -> Result<()> {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Commands::SystemInfo = cli.command {
+        return system_info();
+    }
+
     let paths = resolve_paths(cli.home)?;
     initialize_home(&paths)?;
 
@@ -151,6 +156,7 @@ fn run() -> Result<()> {
         Commands::Init => init(&paths),
         Commands::Search { keyword } => search(&client, &cli.registry, &keyword),
         Commands::Info { name } => info(&client, &cli.registry, &name),
+        Commands::SystemInfo => unreachable!(),
         Commands::Install { name, version } => install(&client, &paths, &cli.registry, &name, version.as_deref()),
         Commands::Update { name } => update(&client, &paths, &cli.registry, name.as_deref()),
         Commands::Remove { name } => remove(&paths, &name),
@@ -226,6 +232,43 @@ fn info(client: &Client, registry: &str, name: &str) -> Result<()> {
     for version in detail.versions {
         println!("{:<14} {:<12} {:<12}", version.version, version.platform, version.arch);
     }
+    Ok(())
+}
+
+fn system_info() -> Result<()> {
+    println!("System information");
+    println!("{:<18} {}", "Host", host_name().unwrap_or_else(|| "-".to_string()));
+    println!("{:<18} {}", "OS", os_display_name().unwrap_or_else(|| std::env::consts::OS.to_string()));
+    println!("{:<18} {}", "Platform", std::env::consts::OS);
+    println!("{:<18} {}", "Family", std::env::consts::FAMILY);
+    println!("{:<18} {}", "Architecture", std::env::consts::ARCH);
+
+    if let Some((total, available)) = memory_info() {
+        println!("{:<18} {}", "Memory total", format_bytes(total));
+        println!("{:<18} {}", "Memory available", format_bytes(available));
+        println!("{:<18} {}", "Memory used", format_bytes(total.saturating_sub(available)));
+    } else {
+        println!("{:<18} {}", "Memory", "unavailable");
+    }
+
+    let storage = storage_info();
+    if storage.is_empty() {
+        println!("{:<18} {}", "Storage", "unavailable");
+        return Ok(());
+    }
+
+    println!();
+    println!("{:<24} {:>14} {:>14} {:>14}", "MOUNT", "TOTAL", "AVAILABLE", "USED");
+    for item in storage {
+        println!(
+            "{:<24} {:>14} {:>14} {:>14}",
+            item.mount,
+            format_bytes(item.total),
+            format_bytes(item.available),
+            format_bytes(item.total.saturating_sub(item.available))
+        );
+    }
+
     Ok(())
 }
 
@@ -335,6 +378,267 @@ fn list(paths: &Paths) -> Result<()> {
         println!("{:<28} {:<14} {:<12} {}", package.name, package.version, package.platform, package.arch);
     }
     Ok(())
+}
+
+struct StorageInfo {
+    mount: String,
+    total: u64,
+    available: u64,
+}
+
+fn host_name() -> Option<String> {
+    env::var("COMPUTERNAME")
+        .or_else(|_| env::var("HOSTNAME"))
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| run_command("hostname", &[]).map(|value| value.trim().to_string()))
+}
+
+#[cfg(windows)]
+fn os_display_name() -> Option<String> {
+    let key = r"HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion";
+    let name = registry_value(key, "ProductName").unwrap_or_else(|| "Windows".to_string());
+    let version = registry_value(key, "DisplayVersion")
+        .or_else(|| registry_value(key, "ReleaseId"))
+        .unwrap_or_else(|| "-".to_string());
+    let build = registry_value(key, "CurrentBuildNumber").unwrap_or_else(|| "-".to_string());
+    Some(format!("{name} {version} (build {build})"))
+}
+
+#[cfg(target_os = "macos")]
+fn os_display_name() -> Option<String> {
+    let name = run_command("sw_vers", &["-productName"])?;
+    let version = run_command("sw_vers", &["-productVersion"])?;
+    let build = run_command("sw_vers", &["-buildVersion"])?;
+    Some(format!("{} {} (build {})", name.trim(), version.trim(), build.trim()))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn os_display_name() -> Option<String> {
+    let os_release = fs::read_to_string("/etc/os-release").ok()?;
+    for line in os_release.lines() {
+        if let Some(value) = line.strip_prefix("PRETTY_NAME=") {
+            return Some(value.trim_matches('"').to_string());
+        }
+    }
+    None
+}
+
+#[cfg(windows)]
+fn memory_info() -> Option<(u64, u64)> {
+    let mut status = MemoryStatusEx::default();
+    status.length = std::mem::size_of::<MemoryStatusEx>() as u32;
+    let ok = unsafe { GlobalMemoryStatusEx(&mut status) };
+    if ok == 0 {
+        return None;
+    }
+    Some((status.total_phys, status.avail_phys))
+}
+
+#[cfg(target_os = "macos")]
+fn memory_info() -> Option<(u64, u64)> {
+    let total = run_command("sysctl", &["-n", "hw.memsize"])?.trim().parse::<u64>().ok()?;
+    let vm_stat = run_command("vm_stat", &[])?;
+    let mut page_size = 4096u64;
+    let mut free_pages = 0u64;
+    for line in vm_stat.lines() {
+        if let Some(size) = line.strip_prefix("Mach Virtual Memory Statistics: (page size of ") {
+            page_size = size.trim_end_matches(" bytes)").parse().ok()?;
+        } else if let Some(value) = line.strip_prefix("Pages free:") {
+            free_pages = parse_vm_stat_pages(value)?;
+        } else if let Some(value) = line.strip_prefix("Pages inactive:") {
+            free_pages = free_pages.saturating_add(parse_vm_stat_pages(value)?);
+        }
+    }
+    Some((total, free_pages.saturating_mul(page_size)))
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn memory_info() -> Option<(u64, u64)> {
+    let text = fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total = None;
+    let mut available = None;
+    for line in text.lines() {
+        if line.starts_with("MemTotal:") {
+            total = parse_meminfo_kb(line);
+        } else if line.starts_with("MemAvailable:") {
+            available = parse_meminfo_kb(line);
+        }
+    }
+    Some((total?, available?))
+}
+
+#[cfg(windows)]
+fn storage_info() -> Vec<StorageInfo> {
+    logical_drives()
+        .into_iter()
+        .filter_map(|drive| {
+            let wide = wide_null(&drive);
+            let drive_type = unsafe { GetDriveTypeW(wide.as_ptr()) };
+            if drive_type != DRIVE_FIXED {
+                return None;
+            }
+
+            let mut available = 0u64;
+            let mut total = 0u64;
+            let mut free = 0u64;
+            let ok = unsafe {
+                GetDiskFreeSpaceExW(
+                    wide.as_ptr(),
+                    &mut available,
+                    &mut total,
+                    &mut free,
+                )
+            };
+            if ok == 0 {
+                return None;
+            }
+
+            Some(StorageInfo {
+                mount: drive.trim_end_matches('\\').to_string(),
+                total,
+                available,
+            })
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn logical_drives() -> Vec<String> {
+    let len = unsafe { GetLogicalDriveStringsW(0, std::ptr::null_mut()) };
+    if len == 0 {
+        return Vec::new();
+    }
+
+    let mut buffer = vec![0u16; len as usize + 1];
+    let written = unsafe { GetLogicalDriveStringsW(buffer.len() as u32, buffer.as_mut_ptr()) };
+    if written == 0 {
+        return Vec::new();
+    }
+
+    let mut drives = Vec::new();
+    let mut start = 0usize;
+    for index in 0..buffer.len() {
+        if buffer[index] == 0 {
+            if index == start {
+                break;
+            }
+            drives.push(String::from_utf16_lossy(&buffer[start..index]));
+            start = index + 1;
+        }
+    }
+    drives
+}
+
+#[cfg(unix)]
+fn storage_info() -> Vec<StorageInfo> {
+    let Some(output) = run_command("df", &["-kP"]) else {
+        return Vec::new();
+    };
+    output
+        .lines()
+        .skip(1)
+        .filter_map(|line| {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 6 {
+                return None;
+            }
+            let total = parts[1].parse::<u64>().ok()?.saturating_mul(1024);
+            let available = parts[3].parse::<u64>().ok()?.saturating_mul(1024);
+            Some(StorageInfo {
+                mount: parts[5].to_string(),
+                total,
+                available,
+            })
+        })
+        .collect()
+}
+
+fn run_command(program: &str, args: &[&str]) -> Option<String> {
+    let output = Command::new(program).args(args).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+#[cfg(windows)]
+fn registry_value(key: &str, name: &str) -> Option<String> {
+    let output = run_command("reg", &["query", key, "/v", name])?;
+    output.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if !trimmed.starts_with(name) {
+            return None;
+        }
+        let parts: Vec<&str> = trimmed.split_whitespace().collect();
+        if parts.len() < 3 {
+            return None;
+        }
+        Some(parts[2..].join(" "))
+    })
+}
+
+#[cfg(windows)]
+fn wide_null(value: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(value).encode_wide().chain(Some(0)).collect()
+}
+
+#[cfg(windows)]
+#[repr(C)]
+#[derive(Default)]
+struct MemoryStatusEx {
+    length: u32,
+    memory_load: u32,
+    total_phys: u64,
+    avail_phys: u64,
+    total_page_file: u64,
+    avail_page_file: u64,
+    total_virtual: u64,
+    avail_virtual: u64,
+    avail_extended_virtual: u64,
+}
+
+#[cfg(windows)]
+const DRIVE_FIXED: u32 = 3;
+
+#[cfg(windows)]
+#[link(name = "kernel32")]
+extern "system" {
+    fn GlobalMemoryStatusEx(buffer: *mut MemoryStatusEx) -> i32;
+    fn GetLogicalDriveStringsW(buffer_length: u32, buffer: *mut u16) -> u32;
+    fn GetDriveTypeW(root_path_name: *const u16) -> u32;
+    fn GetDiskFreeSpaceExW(
+        directory_name: *const u16,
+        free_bytes_available_to_caller: *mut u64,
+        total_number_of_bytes: *mut u64,
+        total_number_of_free_bytes: *mut u64,
+    ) -> i32;
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn parse_meminfo_kb(line: &str) -> Option<u64> {
+    line.split_whitespace().nth(1)?.parse::<u64>().ok().map(|kb| kb.saturating_mul(1024))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_vm_stat_pages(value: &str) -> Option<u64> {
+    value.trim().trim_end_matches('.').parse::<u64>().ok()
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+    let mut value = bytes as f64;
+    let mut unit = 0usize;
+    while value >= 1024.0 && unit < UNITS.len() - 1 {
+        value /= 1024.0;
+        unit += 1;
+    }
+    if unit == 0 {
+        format!("{} {}", bytes, UNITS[unit])
+    } else {
+        format!("{value:.2} {}", UNITS[unit])
+    }
 }
 
 fn fetch_detail(client: &Client, registry: &str, name: &str) -> Result<PackageDetail> {

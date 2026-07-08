@@ -168,41 +168,59 @@ app.MapGet("/api/packages/{name}/versions", async (string name, MtyDbContext db)
             v.Arch,
             v.Sha256,
             v.Signature,
-            $"/api/packages/{name}/versions/{v.Version}/download"))
+            $"/api/packages/{name}/versions/{v.Version}/download?platform={Uri.EscapeDataString(v.Platform)}&arch={Uri.EscapeDataString(v.Arch)}"))
         .ToListAsync();
     return TypedResults.Ok(versions);
 });
 
-app.MapGet("/api/packages/{name}/versions/{version}/manifest", async Task<Results<FileContentHttpResult, NotFound>> (
+app.MapGet("/api/packages/{name}/versions/{version}/manifest", async Task<IResult> (
     string name,
     string version,
+    [FromQuery] string? platform,
+    [FromQuery] string? arch,
     MtyDbContext db,
     PackageStorage storage) =>
 {
-    var packageVersion = await FindPublishedVersionAsync(db, name, version);
-    if (packageVersion is null)
+    var packageVersion = await FindPublishedVersionAsync(db, name, version, platform, arch);
+    if (packageVersion.Status == VersionLookupStatus.NotFound)
     {
-        return TypedResults.NotFound();
+        return Results.NotFound();
+    }
+    if (packageVersion.Status == VersionLookupStatus.Ambiguous)
+    {
+        return AmbiguousVersionResult(name, version);
     }
 
-    return TypedResults.File(Encoding.UTF8.GetBytes(packageVersion.ManifestJson), "application/json", "manifest.json");
+    return Results.File(Encoding.UTF8.GetBytes(packageVersion.Entity!.ManifestJson), "application/json", "manifest.json");
 });
 
-app.MapGet("/api/packages/{name}/versions/{version}/download", async Task<Results<PhysicalFileHttpResult, NotFound>> (
+app.MapGet("/api/packages/{name}/versions/{version}/download", async Task<IResult> (
     string name,
     string version,
+    [FromQuery] string? platform,
+    [FromQuery] string? arch,
     MtyDbContext db,
     PackageStorage storage) =>
 {
-    var packageVersion = await FindPublishedVersionAsync(db, name, version);
-    if (packageVersion is null || !storage.Exists(packageVersion.FilePath))
+    var packageVersion = await FindPublishedVersionAsync(db, name, version, platform, arch);
+    if (packageVersion.Status == VersionLookupStatus.NotFound)
     {
-        return TypedResults.NotFound();
+        return Results.NotFound();
+    }
+    if (packageVersion.Status == VersionLookupStatus.Ambiguous)
+    {
+        return AmbiguousVersionResult(name, version);
     }
 
-    packageVersion.DownloadCount++;
+    var entity = packageVersion.Entity!;
+    if (!storage.Exists(entity.FilePath))
+    {
+        return Results.NotFound();
+    }
+
+    entity.DownloadCount++;
     await db.SaveChangesAsync();
-    return TypedResults.PhysicalFile(storage.Resolve(packageVersion.FilePath), "application/octet-stream", $"{name}-{version}.mty");
+    return TypedResults.PhysicalFile(storage.Resolve(entity.FilePath), "application/octet-stream", $"{name}-{version}.mty");
 });
 
 app.MapGet("/api/self-update", async Task<Results<Ok<PackageVersionDto>, NotFound>> (
@@ -289,6 +307,27 @@ admin.MapPost("/packages", async (CreatePackageRequest request, ClaimsPrincipal 
     return Results.Created($"/api/packages/{request.Name}", new { package.Id, package.Name, package.Description });
 });
 
+admin.MapPut("/packages/{name}", async (string name, UpdatePackageRequest request, ClaimsPrincipal principal, MtyDbContext db) =>
+{
+    var package = await db.Packages.SingleOrDefaultAsync(p => p.Name == name);
+    if (package is null)
+    {
+        return Results.NotFound();
+    }
+
+    if (!string.Equals(name, request.Name, StringComparison.OrdinalIgnoreCase) &&
+        await db.Packages.AnyAsync(p => p.Name == request.Name))
+    {
+        return Results.Problem(statusCode: StatusCodes.Status409Conflict, title: "Package already exists");
+    }
+
+    package.Name = request.Name;
+    package.Description = request.Description;
+    await AddAuditAsync(db, principal.Identity?.Name ?? "admin", "update-package", "package", request.Name);
+    await db.SaveChangesAsync();
+    return Results.Ok(new { package.Id, package.Name, package.Description });
+});
+
 admin.MapDelete("/packages/{name}", async (string name, ClaimsPrincipal principal, MtyDbContext db, PackageStorage storage) =>
 {
     var package = await db.Packages.Include(p => p.Versions).SingleOrDefaultAsync(p => p.Name == name);
@@ -298,6 +337,10 @@ admin.MapDelete("/packages/{name}", async (string name, ClaimsPrincipal principa
     }
 
     storage.DeletePackage(name);
+    foreach (var version in package.Versions)
+    {
+        storage.Delete(version.FilePath);
+    }
     db.PackageVersions.RemoveRange(package.Versions);
     db.Packages.Remove(package);
     await AddAuditAsync(db, principal.Identity?.Name ?? "admin", "delete-package", "package", name);
@@ -440,34 +483,102 @@ admin.MapPost("/packages/{name}/versions/from-executable", async Task<IResult> (
     return Results.Created($"/api/packages/{name}/versions/{request.Version}", ToVersionDto(name, version));
 }).DisableAntiforgery();
 
-admin.MapPost("/packages/{name}/versions/{version}/publish", async (string name, string version, ClaimsPrincipal principal, MtyDbContext db) =>
-    await SetStatusAsync(db, principal, name, version, PackageVersionStatus.Published, "publish-version"));
+admin.MapPost("/packages/{name}/versions/{version}/publish", async (
+    string name,
+    string version,
+    [FromQuery] string? platform,
+    [FromQuery] string? arch,
+    ClaimsPrincipal principal,
+    MtyDbContext db) =>
+    await SetStatusAsync(db, principal, name, version, platform, arch, PackageVersionStatus.Published, "publish-version"));
 
-admin.MapPost("/packages/{name}/versions/{version}/unpublish", async (string name, string version, ClaimsPrincipal principal, MtyDbContext db) =>
-    await SetStatusAsync(db, principal, name, version, PackageVersionStatus.Unpublished, "unpublish-version"));
+admin.MapPost("/packages/{name}/versions/{version}/unpublish", async (
+    string name,
+    string version,
+    [FromQuery] string? platform,
+    [FromQuery] string? arch,
+    ClaimsPrincipal principal,
+    MtyDbContext db) =>
+    await SetStatusAsync(db, principal, name, version, platform, arch, PackageVersionStatus.Unpublished, "unpublish-version"));
 
-admin.MapPost("/packages/{name}/versions/{version}/resign", async (string name, string version, ClaimsPrincipal principal, MtyDbContext db, PackageSigner signer) =>
+admin.MapPost("/packages/{name}/versions/{version}/resign", async (
+    string name,
+    string version,
+    [FromQuery] string? platform,
+    [FromQuery] string? arch,
+    ClaimsPrincipal principal,
+    MtyDbContext db,
+    PackageSigner signer) =>
 {
-    var entity = await db.PackageVersions.Include(v => v.Package).SingleOrDefaultAsync(v => v.Package.Name == name && v.Version == version);
-    if (entity is null)
+    var lookup = await FindVersionAsync(db, name, version, platform, arch);
+    if (lookup.Status == VersionLookupStatus.NotFound)
     {
         return Results.NotFound();
     }
+    if (lookup.Status == VersionLookupStatus.Ambiguous)
+    {
+        return AmbiguousVersionResult(name, version);
+    }
 
+    var entity = lookup.Entity!;
     entity.Signature = signer.Sign(entity.Sha256);
     await AddAuditAsync(db, principal.Identity?.Name ?? "admin", "resign-version", "package-version", $"{name}@{version}");
     await db.SaveChangesAsync();
     return Results.Ok(ToVersionDto(name, entity));
 });
 
-admin.MapDelete("/packages/{name}/versions/{version}", async (string name, string version, ClaimsPrincipal principal, MtyDbContext db, PackageStorage storage) =>
+admin.MapGet("/packages/{name}/versions/{version}/download", async (
+    string name,
+    string version,
+    [FromQuery] string? platform,
+    [FromQuery] string? arch,
+    MtyDbContext db,
+    PackageStorage storage) =>
 {
-    var entity = await db.PackageVersions.Include(v => v.Package).SingleOrDefaultAsync(v => v.Package.Name == name && v.Version == version);
-    if (entity is null)
+    var lookup = await FindVersionAsync(db, name, version, platform, arch);
+    if (lookup.Status == VersionLookupStatus.NotFound)
+    {
+        return Results.NotFound();
+    }
+    if (lookup.Status == VersionLookupStatus.Ambiguous)
+    {
+        return AmbiguousVersionResult(name, version);
+    }
+
+    var entity = lookup.Entity!;
+    if (!storage.Exists(entity.FilePath))
     {
         return Results.NotFound();
     }
 
+    entity.DownloadCount++;
+    await db.SaveChangesAsync();
+    return TypedResults.PhysicalFile(
+        storage.Resolve(entity.FilePath),
+        "application/octet-stream",
+        $"{name}-{version}-{entity.Platform}-{entity.Arch}.mty");
+});
+
+admin.MapDelete("/packages/{name}/versions/{version}", async (
+    string name,
+    string version,
+    [FromQuery] string? platform,
+    [FromQuery] string? arch,
+    ClaimsPrincipal principal,
+    MtyDbContext db,
+    PackageStorage storage) =>
+{
+    var lookup = await FindVersionAsync(db, name, version, platform, arch);
+    if (lookup.Status == VersionLookupStatus.NotFound)
+    {
+        return Results.NotFound();
+    }
+    if (lookup.Status == VersionLookupStatus.Ambiguous)
+    {
+        return AmbiguousVersionResult(name, version);
+    }
+
+    var entity = lookup.Entity!;
     storage.Delete(entity.FilePath);
     db.PackageVersions.Remove(entity);
     await AddAuditAsync(db, principal.Identity?.Name ?? "admin", "delete-version", "package-version", $"{name}@{version}");
@@ -489,11 +600,53 @@ app.Run();
 
 static PackageVersionDto ToVersionDto(string packageName, PackageVersionEntity version) =>
     new(version.Version, version.Platform, version.Arch, version.Sha256, version.Signature,
-        $"/api/packages/{packageName}/versions/{version.Version}/download");
+        $"/api/packages/{packageName}/versions/{version.Version}/download?platform={Uri.EscapeDataString(version.Platform)}&arch={Uri.EscapeDataString(version.Arch)}");
 
-static async Task<PackageVersionEntity?> FindPublishedVersionAsync(MtyDbContext db, string name, string version) =>
-    await db.PackageVersions.Include(v => v.Package)
-        .SingleOrDefaultAsync(v => v.Package.Name == name && v.Version == version && v.Status == PackageVersionStatus.Published);
+static async Task<VersionLookupResult> FindPublishedVersionAsync(
+    MtyDbContext db,
+    string name,
+    string version,
+    string? platform,
+    string? arch) =>
+    await FindVersionAsync(db, name, version, platform, arch, PackageVersionStatus.Published);
+
+static async Task<VersionLookupResult> FindVersionAsync(
+    MtyDbContext db,
+    string name,
+    string version,
+    string? platform,
+    string? arch,
+    PackageVersionStatus? status = null)
+{
+    var query = db.PackageVersions.Include(v => v.Package)
+        .Where(v => v.Package.Name == name && v.Version == version);
+    if (!string.IsNullOrWhiteSpace(platform))
+    {
+        query = query.Where(v => v.Platform == platform);
+    }
+    if (!string.IsNullOrWhiteSpace(arch))
+    {
+        query = query.Where(v => v.Arch == arch);
+    }
+    if (status is not null)
+    {
+        query = query.Where(v => v.Status == status);
+    }
+
+    var matches = await query.Take(2).ToListAsync();
+    return matches.Count switch
+    {
+        0 => new VersionLookupResult(VersionLookupStatus.NotFound, null),
+        1 => new VersionLookupResult(VersionLookupStatus.Found, matches[0]),
+        _ => new VersionLookupResult(VersionLookupStatus.Ambiguous, null)
+    };
+}
+
+static IResult AmbiguousVersionResult(string name, string version) =>
+    Results.Problem(
+        statusCode: StatusCodes.Status409Conflict,
+        title: "Version target is ambiguous",
+        detail: $"Package {name} version {version} exists for multiple platforms. Specify platform and arch.");
 
 static async Task<PackageVersionEntity?> FindLatestPublishedVersionAsync(MtyDbContext db, string name, string platform, string arch) =>
     await db.PackageVersions.Include(v => v.Package)
@@ -555,14 +708,27 @@ static string SanitizeFileName(string fileName)
     return string.IsNullOrWhiteSpace(sanitized) ? "tool" : sanitized;
 }
 
-static async Task<IResult> SetStatusAsync(MtyDbContext db, ClaimsPrincipal principal, string name, string version, PackageVersionStatus status, string action)
+static async Task<IResult> SetStatusAsync(
+    MtyDbContext db,
+    ClaimsPrincipal principal,
+    string name,
+    string version,
+    string? platform,
+    string? arch,
+    PackageVersionStatus status,
+    string action)
 {
-    var entity = await db.PackageVersions.Include(v => v.Package).SingleOrDefaultAsync(v => v.Package.Name == name && v.Version == version);
-    if (entity is null)
+    var lookup = await FindVersionAsync(db, name, version, platform, arch);
+    if (lookup.Status == VersionLookupStatus.NotFound)
     {
         return Results.NotFound();
     }
+    if (lookup.Status == VersionLookupStatus.Ambiguous)
+    {
+        return AmbiguousVersionResult(name, version);
+    }
 
+    var entity = lookup.Entity!;
     entity.Status = status;
     await AddAuditAsync(db, principal.Identity?.Name ?? "admin", action, "package-version", $"{name}@{version}");
     await db.SaveChangesAsync();
@@ -865,6 +1031,7 @@ sealed record LoginResponse(string Token, string Username);
 sealed record SigningKeyDto(string Algorithm, string PublicKey);
 sealed record SigningKeyFile(string Algorithm, string PrivateKey, string PublicKey);
 sealed record CreatePackageRequest([Required] string Name, [Required] string Description);
+sealed record UpdatePackageRequest([Required] string Name, [Required] string Description);
 sealed record UploadVersionRequest(
     [Required] IFormFile File);
 sealed class GenerateVersionRequest
@@ -881,6 +1048,13 @@ sealed record PackageVersionDto(string Version, string Platform, string Arch, st
 sealed record AdminPackageDto(Guid Id, string Name, string Description, int VersionCount, string? LatestVersion);
 sealed record AdminPackageDetailDto(string Name, string Description, List<AdminPackageVersionDto> Versions);
 sealed record AdminPackageVersionDto(string Version, string Platform, string Arch, string Sha256, string Signature, string Status, long DownloadCount, DateTimeOffset CreatedAt);
+sealed record VersionLookupResult(VersionLookupStatus Status, PackageVersionEntity? Entity);
+enum VersionLookupStatus
+{
+    NotFound,
+    Found,
+    Ambiguous
+}
 sealed record AuditLogDto(DateTimeOffset CreatedAt, string Actor, string Action, string TargetType, string Target);
 sealed record StagedPackage(string FullPath, string Sha256);
 sealed record StoredPackage(string RelativePath, string Sha256);

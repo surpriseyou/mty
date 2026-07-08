@@ -11,6 +11,8 @@ export const router = createRouter({
     { path: '/login', component: LoginView },
     { path: '/', redirect: '/packages' },
     { path: '/packages', component: PackagesView },
+    { path: '/packages/new', component: UploadView },
+    { path: '/packages/:name/edit', component: UploadView, meta: { editPackage: true } },
     { path: '/packages/:name', component: PackageDetailView },
     { path: '/upload', component: UploadView },
     { path: '/audit', component: AuditView }
@@ -22,4 +24,3 @@ router.beforeEach((to) => {
     return '/login'
   }
 })
-

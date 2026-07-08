@@ -5,7 +5,7 @@
         <h1>Packages</h1>
         <p>Search, inspect, and prepare internal tool releases.</p>
       </div>
-      <el-button type="primary" @click="$router.push('/upload')">Upload version</el-button>
+      <el-button type="primary" @click="$router.push('/packages/new')">新增package</el-button>
     </div>
     <div class="panel">
       <div class="toolbar">
@@ -19,6 +19,12 @@
         <el-table-column prop="latestVersion" label="Latest" width="140">
           <template #default="{ row }">{{ row.latestVersion ?? '-' }}</template>
         </el-table-column>
+        <el-table-column label="Actions" width="160">
+          <template #default="{ row }">
+            <el-button size="small" @click.stop="editPackage(row)">Edit</el-button>
+            <el-button size="small" type="danger" @click.stop="deletePackage(row)">Delete</el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </div>
   </section>
@@ -27,6 +33,7 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api, type AdminPackage } from '../api'
 
 const router = useRouter()
@@ -50,6 +57,26 @@ function openPackage(row: AdminPackage) {
   router.push(`/packages/${row.name}`)
 }
 
+function editPackage(row: AdminPackage) {
+  router.push({
+    path: `/packages/${row.name}/edit`,
+    query: {
+      name: row.name,
+      description: row.description
+    }
+  })
+}
+
+async function deletePackage(row: AdminPackage) {
+  await ElMessageBox.confirm(`Delete package ${row.name} and all versions?`, 'Delete package', {
+    type: 'warning',
+    confirmButtonText: 'Delete',
+    cancelButtonText: 'Cancel'
+  })
+  await api.delete(`/api/admin/packages/${row.name}`)
+  ElMessage.success('Package deleted')
+  await load()
+}
+
 onMounted(load)
 </script>
-
