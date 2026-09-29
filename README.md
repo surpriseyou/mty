@@ -101,7 +101,13 @@ cd cli
 cargo run -- init
 cargo run -- system-info
 cargo run -- --registry http://localhost:5000 search demo
+cargo run -- --json list
+cargo run -- outdated
+cargo run -- update --dry-run
+cargo run -- completion powershell
 ```
+
+`mty --json` emits machine-readable results for commands; progress and errors go to stderr. `mty completion` prints a shell completion script for `bash`, `zsh`, `fish`, or `powershell`.
 
 The registry signs uploaded packages automatically. CLI install verifies signatures using `MTY_PUBLIC_KEY` when set, otherwise it fetches the registry public key from `/api/signing-key`.
 
