@@ -67,6 +67,26 @@ builder.Services.AddAuthorization();
 var app = builder.Build();
 
 app.UseExceptionHandler();
+if (builder.Configuration.GetValue<bool>("Mty:ServeWeb"))
+{
+    app.UseDefaultFiles();
+    app.UseStaticFiles();
+    app.Use(async (context, next) =>
+    {
+        var path = context.Request.Path;
+        if (HttpMethods.IsGet(context.Request.Method) &&
+            !path.StartsWithSegments("/api") &&
+            !path.StartsWithSegments("/health") &&
+            !Path.HasExtension(path.Value))
+        {
+            context.Response.ContentType = "text/html";
+            await context.Response.SendFileAsync(Path.Combine(app.Environment.WebRootPath!, "index.html"));
+            return;
+        }
+
+        await next();
+    });
+}
 app.UseCors("admin-web");
 app.UseAuthentication();
 app.UseAuthorization();

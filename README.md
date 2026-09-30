@@ -42,6 +42,14 @@ Default exposed ports:
 
 The web container serves the built Vue app with `caddy:latest`.
 
+For a single image and container, use `docker-compose.fullstack.yml`. Run the publish script from PowerShell; it defaults to the full-stack image. Pass `-ImageMode Separate` only when publishing the original two images:
+
+```powershell
+.\scripts\publish-docker-hub.ps1
+```
+
+The script publishes `mty_app:latest` and a version tag, then removes those local tags. In the NAS Compose editor, set `DOCKERHUB_USER` to your Docker Hub username or replace the `YOUR_DOCKERHUB_USERNAME` placeholder in the image name. The combined container serves both the admin page and API on the existing API and web host ports. Stop the old two-container stack before switching because the host ports are reused; the package volume remains mounted at the same path.
+
 Override the external database connection with:
 
 ```powershell

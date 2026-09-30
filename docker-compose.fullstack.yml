@@ -1,0 +1,22 @@
+services:
+  mty_app:
+    image: docker.io/${DOCKERHUB_USER:-YOUR_DOCKERHUB_USERNAME}/mty_app:latest
+    container_name: mty_app
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://+:5000
+      ConnectionStrings__Postgres: ${POSTGRES_CONNECTION_STRING:-Host=host.docker.internal;Port=5432;Database=mty;Username=postgres;Password=123}
+      Mty__PackageRoot: /app/packages
+      Mty__ServeWeb: "true"
+      Mty__Jwt__Issuer: ${MTY_JWT_ISSUER:-mty}
+      Mty__Jwt__Audience: ${MTY_JWT_AUDIENCE:-mty-admin}
+      Mty__Jwt__SigningKey: ${MTY_JWT_SIGNING_KEY:-replace-with-at-least-32-characters-secret}
+      Mty__Admin__Username: ${MTY_ADMIN_USERNAME:-admin}
+      Mty__Admin__Password: ${MTY_ADMIN_PASSWORD:-ChangeMe123!}
+      VITE_API_BASE_URL: ${VITE_API_BASE_URL:-/}
+    ports:
+      - "${MTY_SERVER_PORT:-5000}:5000"
+      - "${MTY_WEB_PORT:-5173}:5000"
+    volumes:
+      - ${MTY_PACKAGE_ROOT:-./data/packages}:/app/packages
+    restart: unless-stopped
