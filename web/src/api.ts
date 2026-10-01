@@ -1,5 +1,6 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { errorText } from './ui'
 
 declare global {
   interface Window {
@@ -31,18 +32,7 @@ api.interceptors.response.use(
   (error) => {
     const status = error.response?.status
     const data = error.response?.data
-    const title = data?.title ?? data?.error ?? error.message
-    const detail = data?.detail ? `: ${data.detail}` : ''
-
-    if (status === 404) {
-      ElMessage.error(`Not found${detail || ': package, version, or API endpoint does not exist'}`)
-    } else if (status === 401 || status === 403) {
-      ElMessage.error('Session expired or permission denied. Sign in again.')
-    } else if (status === 409) {
-      ElMessage.error(`Conflict${detail || ': this version already exists'}`)
-    } else {
-      ElMessage.error(`${title}${detail}`)
-    }
+    ElMessage.error(errorText(status, data?.title ?? data?.error))
 
     return Promise.reject(error)
   }
@@ -60,6 +50,25 @@ export interface AdminPackage {
   description: string
   versionCount: number
   latestVersion: string | null
+}
+
+export interface AdminOverview {
+  packageCount: number
+  versionCount: number
+  publishedVersionCount: number
+  downloadCount: number
+}
+
+export interface AdminPackageDetail {
+  name: string
+  description: string
+  versions: AdminPackageVersion[]
+}
+
+export interface AdminPackageVersion extends Omit<PackageVersion, 'downloadUrl'> {
+  status: string
+  downloadCount: number
+  createdAt: string
 }
 
 export interface PackageVersion {
@@ -82,7 +91,7 @@ export interface AuditLog {
 export interface PackageManifest {
   name: string
   version: string
-  description?: string
+  description?: string | null
   platform: string
   arch: string
   entry: string

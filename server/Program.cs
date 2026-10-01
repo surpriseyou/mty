@@ -273,6 +273,25 @@ app.MapGet("/api/self-update/download", async Task<Results<PhysicalFileHttpResul
 
 var admin = app.MapGroup("/api/admin").RequireAuthorization();
 
+admin.MapGet("/overview", async (MtyDbContext db) =>
+{
+    var packageCount = await db.Packages.CountAsync();
+    var versions = await db.PackageVersions
+        .GroupBy(v => 1)
+        .Select(g => new
+        {
+            VersionCount = g.Count(),
+            PublishedVersionCount = g.Count(v => v.Status == PackageVersionStatus.Published),
+            DownloadCount = g.Sum(v => v.DownloadCount)
+        })
+        .SingleOrDefaultAsync();
+    return TypedResults.Ok(new AdminOverviewDto(
+        packageCount,
+        versions?.VersionCount ?? 0,
+        versions?.PublishedVersionCount ?? 0,
+        versions?.DownloadCount ?? 0));
+});
+
 admin.MapGet("/packages", async (MtyDbContext db) =>
 {
     var packages = await db.Packages.AsNoTracking()
@@ -1066,6 +1085,7 @@ sealed record PackageSummaryDto(string Name, string Description, string? LatestV
 sealed record PackageDetailDto(string Name, string Description, List<PackageVersionDto> Versions);
 sealed record PackageVersionDto(string Version, string Platform, string Arch, string Sha256, string Signature, string DownloadUrl);
 sealed record AdminPackageDto(Guid Id, string Name, string Description, int VersionCount, string? LatestVersion);
+sealed record AdminOverviewDto(int PackageCount, int VersionCount, int PublishedVersionCount, long DownloadCount);
 sealed record AdminPackageDetailDto(string Name, string Description, List<AdminPackageVersionDto> Versions);
 sealed record AdminPackageVersionDto(string Version, string Platform, string Arch, string Sha256, string Signature, string Status, long DownloadCount, DateTimeOffset CreatedAt);
 sealed record VersionLookupResult(VersionLookupStatus Status, PackageVersionEntity? Entity);
