@@ -950,8 +950,9 @@ dependencies = [
 
 [[package]]
 name = "mty"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
+ "anstream",
  "anyhow",
  "base64",
  "clap",

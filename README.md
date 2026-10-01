@@ -117,6 +117,8 @@ cargo run -- completion powershell
 
 `mty --json` emits machine-readable results for commands; progress and errors go to stderr. `mty completion` prints a shell completion script for `bash`, `zsh`, `fish`, or `powershell`.
 
+CLI text output uses semantic colors for headings, package names, versions, paths, progress, success, warnings, and errors. The global `--color auto|always|never` option defaults to `auto`, detecting stdout and stderr independently. Set `NO_COLOR` to disable automatic colors, use `mty --color always list` to force colors, or `mty --color never list` for plain text. JSON mode (including diagnostics) and completion scripts stay plain even with `--color always`.
+
 The registry signs uploaded packages automatically. CLI install verifies signatures using `MTY_PUBLIC_KEY` when set, otherwise it fetches the registry public key from `/api/signing-key`.
 
 By default MTY uses:

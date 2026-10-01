@@ -1,6 +1,8 @@
+use anstream::{eprintln, println};
 use anyhow::{anyhow, Context, Result};
 use base64::Engine;
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::builder::styling::{AnsiColor, Style};
+use clap::{CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use reqwest::blocking::{Client, RequestBuilder, Response};
 use reqwest::StatusCode;
@@ -9,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fmt::{self, Display};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -33,8 +36,85 @@ struct Cli {
     /// Emit a single JSON result; diagnostics go to stderr.
     #[arg(long, global = true)]
     json: bool,
+    /// Control terminal colors (JSON and completion scripts stay plain).
+    #[arg(long, value_enum, default_value = "auto", global = true)]
+    color: ColorMode,
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, ValueEnum)]
+enum ColorMode {
+    #[default]
+    Auto,
+    Always,
+    Never,
+}
+
+const HEADING: Style = AnsiColor::Blue.on_default().bold();
+const NAME: Style = AnsiColor::Cyan.on_default();
+const VERSION: Style = AnsiColor::Green.on_default();
+const PATH: Style = AnsiColor::Magenta.on_default();
+const PROGRESS: Style = AnsiColor::Blue.on_default();
+const SUCCESS: Style = AnsiColor::Green.on_default();
+const WARNING: Style = AnsiColor::Yellow.on_default();
+const ERROR: Style = AnsiColor::Red.on_default();
+
+// Apply field padding to the value, never to the ANSI escape sequences.
+struct Styled<T>(Style, T);
+
+impl<T: Display> Display for Styled<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.0)?;
+        self.1.fmt(f)?;
+        write!(f, "{}", self.0.render_reset())
+    }
+}
+
+fn parse_cli(args: impl IntoIterator<Item = std::ffi::OsString>) -> Result<Cli, clap::Error> {
+    let args: Vec<_> = args.into_iter().collect();
+    // Read global output options before Clap renders help or an argument error.
+    let options = Cli::command()
+        .disable_help_flag(true)
+        .disable_help_subcommand(true)
+        .disable_version_flag(true)
+        .arg(
+            clap::Arg::new("help")
+                .long("help")
+                .short('h')
+                .global(true)
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            clap::Arg::new("display_version")
+                .long("version")
+                .short('V')
+                .action(clap::ArgAction::SetTrue),
+        )
+        .ignore_errors(true)
+        .get_matches_from(&args);
+    let color = if options.get_flag("json") {
+        ColorMode::Never
+    } else {
+        *options
+            .get_one::<ColorMode>("color")
+            .unwrap_or(&ColorMode::Auto)
+    };
+    let choice = match color {
+        ColorMode::Auto => anstream::ColorChoice::Auto,
+        ColorMode::Always => anstream::ColorChoice::Always,
+        ColorMode::Never => anstream::ColorChoice::Never,
+    };
+    choice.write_global();
+    let clap_color = match color {
+        ColorMode::Auto => clap::ColorChoice::Auto,
+        ColorMode::Always => clap::ColorChoice::Always,
+        ColorMode::Never => clap::ColorChoice::Never,
+    };
+    let matches = Cli::command()
+        .color(clap_color)
+        .try_get_matches_from(args)?;
+    Cli::from_arg_matches(&matches)
 }
 
 #[derive(Subcommand)]
@@ -167,13 +247,13 @@ struct SigningKeyDto {
 }
 
 fn main() -> Result<()> {
-    let cli = Cli::parse();
+    let cli = parse_cli(env::args_os()).unwrap_or_else(|error| error.exit());
     let json = cli.json;
     if let Err(error) = run(cli) {
         if json {
             eprintln!("{}", serde_json::json!({"error": format!("{error:#}")}));
         } else {
-            eprintln!("error: {error:#}");
+            eprintln!("{}", Styled(ERROR, format_args!("error: {error:#}")));
         }
         std::process::exit(1);
     }
@@ -259,8 +339,12 @@ fn print_json(value: &impl Serialize) -> Result<()> {
 }
 
 macro_rules! status {
+    ($json:expr, $style:ident; $($args:tt)*) => {
+        if $json { eprintln!($($args)*); }
+        else { println!("{}", Styled($style, format_args!($($args)*))); }
+    };
     ($json:expr, $($args:tt)*) => {
-        if $json { eprintln!($($args)*); } else { println!($($args)*); }
+        status!($json, PROGRESS; $($args)*);
     };
 }
 
@@ -307,12 +391,28 @@ fn init(paths: &Paths, json: bool) -> Result<()> {
             &serde_json::json!({"status": "initialized", "home": paths.root, "tools": paths.tools, "bin": paths.bin, "executable": installed}),
         );
     }
-    println!("MTY home: {}", paths.root.display());
-    println!("Tools: {}", paths.tools.display());
-    println!("Command shims: {}", paths.bin.display());
-    println!("MTY executable: {}", installed.display());
-    println!("Command: mty");
-    println!("PATH is configured for future shells. Restart your terminal if commands are not found yet.");
+    println!(
+        "{} {}",
+        Styled(HEADING, "MTY home:"),
+        Styled(PATH, paths.root.display())
+    );
+    println!(
+        "{} {}",
+        Styled(HEADING, "Tools:"),
+        Styled(PATH, paths.tools.display())
+    );
+    println!(
+        "{} {}",
+        Styled(HEADING, "Command shims:"),
+        Styled(PATH, paths.bin.display())
+    );
+    println!(
+        "{} {}",
+        Styled(HEADING, "MTY executable:"),
+        Styled(PATH, installed.display())
+    );
+    println!("{} {}", Styled(HEADING, "Command:"), Styled(NAME, "mty"));
+    println!("{}", Styled(SUCCESS, "PATH is configured for future shells. Restart your terminal if commands are not found yet."));
     Ok(())
 }
 
@@ -325,15 +425,24 @@ fn search(client: &Client, registry: &str, keyword: &str, json: bool) -> Result<
         return print_json(&packages);
     }
     if packages.is_empty() {
-        println!("No packages found.");
+        println!("{}", Styled(WARNING, "No packages found."));
         return Ok(());
     }
-    println!("{:<28} {:<14} {}", "NAME", "LATEST", "DESCRIPTION");
+    println!(
+        "{}",
+        Styled(
+            HEADING,
+            format_args!("{:<28} {:<14} {}", "NAME", "LATEST", "DESCRIPTION")
+        )
+    );
     for package in packages {
         println!(
             "{:<28} {:<14} {}",
-            package.name,
-            package.latest_version.unwrap_or_else(|| "-".to_string()),
+            Styled(NAME, package.name),
+            Styled(
+                VERSION,
+                package.latest_version.unwrap_or_else(|| "-".to_string())
+            ),
             package.description
         );
     }
@@ -346,16 +455,31 @@ fn info(client: &Client, registry: &str, name: &str, json: bool) -> Result<()> {
     if json {
         return print_json(&detail);
     }
-    println!("{}\n{}", detail.name, detail.description);
+    println!(
+        "{}\n{}",
+        Styled(NAME.bold(), detail.name),
+        detail.description
+    );
     if detail.versions.is_empty() {
-        println!("No published versions are available.");
+        println!(
+            "{}",
+            Styled(WARNING, "No published versions are available.")
+        );
         return Ok(());
     }
-    println!("{:<14} {:<12} {:<12}", "VERSION", "PLATFORM", "ARCH");
+    println!(
+        "{}",
+        Styled(
+            HEADING,
+            format_args!("{:<14} {:<12} {:<12}", "VERSION", "PLATFORM", "ARCH")
+        )
+    );
     for version in detail.versions {
         println!(
             "{:<14} {:<12} {:<12}",
-            version.version, version.platform, version.arch
+            Styled(VERSION, version.version),
+            version.platform,
+            version.arch
         );
     }
     Ok(())
@@ -370,48 +494,82 @@ fn system_info(json: bool) -> Result<()> {
             "storage": storage_info().iter().map(|s| serde_json::json!({"mount": s.mount, "total": s.total, "available": s.available, "used": s.total.saturating_sub(s.available)})).collect::<Vec<_>>()
         }));
     }
-    println!("System information");
+    println!("{}", Styled(HEADING, "System information"));
     println!(
         "{:<18} {}",
-        "Host",
+        Styled(HEADING, "Host"),
         host_name().unwrap_or_else(|| "-".to_string())
     );
     println!(
         "{:<18} {}",
-        "OS",
+        Styled(HEADING, "OS"),
         os_display_name().unwrap_or_else(|| std::env::consts::OS.to_string())
     );
-    println!("{:<18} {}", "Platform", std::env::consts::OS);
-    println!("{:<18} {}", "Family", std::env::consts::FAMILY);
-    println!("{:<18} {}", "Architecture", std::env::consts::ARCH);
+    println!(
+        "{:<18} {}",
+        Styled(HEADING, "Platform"),
+        std::env::consts::OS
+    );
+    println!(
+        "{:<18} {}",
+        Styled(HEADING, "Family"),
+        std::env::consts::FAMILY
+    );
+    println!(
+        "{:<18} {}",
+        Styled(HEADING, "Architecture"),
+        std::env::consts::ARCH
+    );
 
     if let Some((total, available)) = memory_info() {
-        println!("{:<18} {}", "Memory total", format_bytes(total));
-        println!("{:<18} {}", "Memory available", format_bytes(available));
         println!(
             "{:<18} {}",
-            "Memory used",
+            Styled(HEADING, "Memory total"),
+            format_bytes(total)
+        );
+        println!(
+            "{:<18} {}",
+            Styled(HEADING, "Memory available"),
+            format_bytes(available)
+        );
+        println!(
+            "{:<18} {}",
+            Styled(HEADING, "Memory used"),
             format_bytes(total.saturating_sub(available))
         );
     } else {
-        println!("{:<18} {}", "Memory", "unavailable");
+        println!(
+            "{:<18} {}",
+            Styled(HEADING, "Memory"),
+            Styled(WARNING, "unavailable")
+        );
     }
 
     let storage = storage_info();
     if storage.is_empty() {
-        println!("{:<18} {}", "Storage", "unavailable");
+        println!(
+            "{:<18} {}",
+            Styled(HEADING, "Storage"),
+            Styled(WARNING, "unavailable")
+        );
         return Ok(());
     }
 
     println!();
     println!(
-        "{:<24} {:>14} {:>14} {:>14}",
-        "MOUNT", "TOTAL", "AVAILABLE", "USED"
+        "{}",
+        Styled(
+            HEADING,
+            format_args!(
+                "{:<24} {:>14} {:>14} {:>14}",
+                "MOUNT", "TOTAL", "AVAILABLE", "USED"
+            )
+        )
     );
     for item in storage {
         println!(
             "{:<24} {:>14} {:>14} {:>14}",
-            item.mount,
+            Styled(PATH, item.mount),
             format_bytes(item.total),
             format_bytes(item.available),
             format_bytes(item.total.saturating_sub(item.available))
@@ -478,8 +636,8 @@ fn install(
     warn_missing_dependencies(paths, &manifest)?;
     status!(json, "Installing files...");
     let package = commit_install(paths, &manifest, &extracted)?;
-    status!(json, "Installed {} {}.", manifest.name, manifest.version);
-    status!(json, "Command: {}", manifest.name);
+    status!(json, SUCCESS; "Installed {} {}.", manifest.name, manifest.version);
+    status!(json, NAME; "Command: {}", manifest.name);
     Ok(package)
 }
 
@@ -532,11 +690,11 @@ fn update(
             result.target_version = Some(latest.version.clone());
             if result.current_version.as_deref() == Some(latest.version.as_str()) {
                 result.status = "current".into();
-                status!(json, "{package_name} is already current.");
+                status!(json, SUCCESS; "{package_name} is already current.");
             } else if dry_run {
                 result.status = "available".into();
                 status!(
-                    json,
+                    json, WARNING;
                     "{}: {} -> {}",
                     package_name,
                     result.current_version.as_deref().unwrap_or("not installed"),
@@ -557,7 +715,10 @@ fn update(
         })();
         if let Err(error) = attempt {
             failures += 1;
-            eprintln!("error: {package_name}: {error:#}");
+            eprintln!(
+                "{}",
+                Styled(ERROR, format_args!("error: {package_name}: {error:#}"))
+            );
             result.status = "failed".into();
             result.error = Some(format!("{error:#}"));
         }
@@ -569,11 +730,23 @@ fn update(
         print_json(&results)?;
     } else if results.is_empty() {
         println!(
-            "No packages to {}.",
-            if dry_run { "update" } else { "process" }
+            "{}",
+            Styled(
+                WARNING,
+                format_args!(
+                    "No packages to {}.",
+                    if dry_run { "update" } else { "process" }
+                )
+            )
         );
     } else {
-        println!("{} package(s) checked; {} failed.", results.len(), failures);
+        println!(
+            "{}",
+            Styled(
+                if failures == 0 { SUCCESS } else { ERROR },
+                format_args!("{} package(s) checked; {} failed.", results.len(), failures)
+            )
+        );
     }
     if failures > 0 {
         return Err(anyhow!(
@@ -649,7 +822,7 @@ fn remove(paths: &Paths, name: &str, json: bool) -> Result<()> {
     if json {
         print_json(&serde_json::json!({"status": "removed", "name": name}))?;
     } else {
-        println!("Removed {name}.");
+        println!("{}", Styled(SUCCESS, format_args!("Removed {name}.")));
     }
     Ok(())
 }
@@ -662,17 +835,26 @@ fn list(paths: &Paths, json: bool) -> Result<()> {
         return print_json(&packages);
     }
     if state.installed.is_empty() {
-        println!("No packages installed.");
+        println!("{}", Styled(WARNING, "No packages installed."));
         return Ok(());
     }
     println!(
-        "{:<28} {:<14} {:<12} {}",
-        "NAME", "VERSION", "PLATFORM", "ARCH"
+        "{}",
+        Styled(
+            HEADING,
+            format_args!(
+                "{:<28} {:<14} {:<12} {}",
+                "NAME", "VERSION", "PLATFORM", "ARCH"
+            )
+        )
     );
     for package in packages {
         println!(
             "{:<28} {:<14} {:<12} {}",
-            package.name, package.version, package.platform, package.arch
+            Styled(NAME, &package.name),
+            Styled(VERSION, &package.version),
+            package.platform,
+            package.arch
         );
     }
     Ok(())
@@ -1274,12 +1456,18 @@ fn warn_missing_dependencies(paths: &Paths, manifest: &PackageManifest) -> Resul
     for dependency in &manifest.dependencies {
         match state.installed.get(&dependency.name) {
             None => eprintln!(
-                "warning: dependency {} {} is not installed",
-                dependency.name, dependency.version
+                "{}",
+                Styled(
+                    WARNING,
+                    format_args!(
+                        "warning: dependency {} {} is not installed",
+                        dependency.name, dependency.version
+                    )
+                )
             ),
             Some(installed) => {
                 if let Some(warning) = dependency_warning(dependency, &installed.version) {
-                    eprintln!("warning: {warning}");
+                    eprintln!("{}", Styled(WARNING, format_args!("warning: {warning}")));
                 }
             }
         }
@@ -1712,6 +1900,14 @@ fn sha256_hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn styles_preserve_padding_and_reset() {
+        assert_eq!(
+            format!("{:<8}|{:>8}", Styled(NAME, "demo"), Styled(VERSION, "1.0")),
+            "\x1b[36mdemo    \x1b[0m|\x1b[32m     1.0\x1b[0m"
+        );
+    }
 
     fn paths(root: &Path) -> Paths {
         Paths {

@@ -1,9 +1,10 @@
 [package]
 name = "mty"
-version = "1.0.0"
+version = "1.0.1"
 edition = "2021"
 
 [dependencies]
+anstream = "1"
 anyhow = "1"
 base64 = "0.22"
 clap = { version = "4", features = ["derive", "env"] }
